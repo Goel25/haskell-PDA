@@ -1,15 +1,33 @@
 # Recognizes string of the form {0^k1^k}
 # 0 0 0 1 1
 # END-INPUT
-push ^
-case {
-  0^ push 0
-  00 push 0
-  01 reject
-#  10 pop
-#  1^ reject
-#  11 reject
-#  _^ accept
-#  _0 reject
-#  _1 reject
+
+# State with an ! is accepting
+# * is a wildcard
+# _ is an empty stack
+
+
+start! {
+  0_
+    push S
+    goto loop
+  1_
+    goto reject
+}
+loop! {
+  00
+    push 0
+    goto loop
+  01
+    goto reject
+  10
+    pop
+    goto loop
+  11
+    goto reject
+  1_
+    goto reject
+}
+reject {
+  ** goto reject
 }

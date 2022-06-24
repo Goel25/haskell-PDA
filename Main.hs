@@ -5,106 +5,112 @@ import System.IO
 import Control.Monad
 import Control.Exception
 
-data LOC = Push Char
-         | Pop
-         | Accept
-         | Reject
-         | Body [LOC]
-         | CaseExpr [LOC]
-         | Case { tape :: Char, stack :: Char, expression :: LOC }
-         | Err String
-       deriving Show
+newtype Program = Program [State]
+data State = Accepting String [Case] | Rejecting String [Case]
+data Case = Case { tape :: Char, stack :: Char, statements :: [Statement] }
+data Statement = Push Char
+               | Pop
+               | Goto String
+               deriving Show
 
-newtype Parser = Parser {
-            runParser :: [String] -> Either String (LOC, [String])
+showListWithSeparator :: Show a => [a] -> String -> String
+showListWithSeparator inp sep = foldl (\acc x -> acc ++ sep ++ show x) "" inp
+
+instance Show Program where
+  show (Program states) = showListWithSeparator states "\n"
+instance Show State where
+  show (Accepting name cases) = name ++ "! {" ++ showListWithSeparator cases "\n" ++ "\n}"
+  show (Rejecting name cases) = name ++ " {" ++ showListWithSeparator cases "\n" ++ "\n}"
+instance Show Case where
+  show (Case tape stack statements) = "  " ++
+                  [tape,stack] ++
+                  showListWithSeparator statements "\n    "
+
+
+newtype Parser a = Parser {
+            runParser :: [String] -> Either String (a, [String])
                         }
 
 main :: IO ()
 main = do
     handle <- openFile "simpleMachine.pda" ReadMode
     contents <- hGetContents handle
-    print $ (parseFull . tokenize) contents
+    case (runParser programParser . tokenize) contents of
+              Left err -> print err
+              Right (program, _) -> print program
 
-parseFull :: [String] -> Either String [LOC]
-parseFull [] = Right []
-parseFull str = do
-                  (loc, restStr) <- runParser parse str
-                  rest <- parseFull restStr
-                  return $ loc : rest
+programParser :: Parser Program
+programParser = Parser $ \inp -> do
+  (state, afterStr) <- runParser stateParser inp
+  (restStates, afterStr') <- if null afterStr
+                                then Right ([], [])
+                                else do
+                                  (Program states, str) <- runParser programParser afterStr
+                                  return (states, str)
+  return (Program $ state : restStates, afterStr')
 
-allParsers :: [Parser]
-allParsers = [parsePop, parsePush, parseCaseExpr, parseReject, parseAccept]
+stateParser :: Parser State
+stateParser = Parser $ \case
+  (stateName:"{":inp) -> do
+    (body, afterStr) <- runParser bodyParser inp
 
-parse :: Parser
-parse = Parser $ \str -> go str allParsers
+    if last stateName == '!' then Right (Accepting (init stateName) body, afterStr)
+    else Right (Rejecting stateName body, afterStr)
+      where
+        bodyParser :: Parser [Case]
+        bodyParser = Parser $ \inp -> do
+          (caseExpr, afterStr) <- runParser caseParser inp
+          (restCases, afterStr') <- if head afterStr == "}"
+                                       then Right ([], tail afterStr)
+                                       else runParser bodyParser afterStr
+          return (caseExpr : restCases, afterStr')
+  _ -> Left "Err not state"
+
+
+
+caseParser :: Parser Case
+caseParser = Parser $ \case
+  ([tape, stack]:xs) -> do
+                    (statements, afterStr) <- runParser statementsParser xs
+                    return (Case tape stack statements, afterStr)
+    where
+      statementsParser :: Parser [Statement]
+      statementsParser = Parser $ \inp ->
+                    if null inp then Left "Each state must close with a goto"
+                    else do
+                      (statement, restStr) <- runParser statementParser inp
+                      (restStatements, afterStr) <- case statement of
+                                                      Goto state -> Right ([], restStr)
+                                                      _ -> runParser statementsParser restStr
+                      return (statement : restStatements, afterStr)
+  _ -> Left "A case must begin with a tape and stack symbol"
+
+statementParser :: Parser Statement
+statementParser = go [pushParser, popParser, gotoParser]
   where
-    go :: [String] -> [Parser] -> Either String (LOC, [String])
-    go str [] = Left $ "Could not parse " ++ head str
-    go str (parser:xs) = case runParser parser str of
-                           Right x -> Right x
-                           Left "" -> go str xs
-                           Left err -> Left err
+    go :: [Parser Statement] -> Parser Statement
+    go [] = Parser $ \inp -> Left $ if null inp then "Unexpected EOF" else "Unrecognized statement " ++ head inp
+    go (parser:otherParsers) = Parser $ \inp -> case runParser parser inp of
+                                 Right success -> Right success
+                                 Left "" -> runParser (go otherParsers) inp
+                                 Left err -> Left err
 
 
-parseCaseExpr :: Parser
-parseCaseExpr = Parser $ \case
-                  ("case":"{":xs) -> do
-                        (body, afterStr) <- runParser parseBody xs
-                        return $ case body of
-                            Body lines -> (CaseExpr lines, afterStr)
-                            x -> (CaseExpr [x], afterStr)
-                    where
-                      parseBody :: Parser
-                      parseBody = Parser $ \case
-                          ("}":xs) -> Right (Body [], xs)
-                          xs -> do
-                                  (loc, restStr) <- runParser parseCase xs
-                                  (restLoc, afterStr) <- runParser parseBody restStr
-                                  return (appendToBody loc restLoc, afterStr)
-
-                      appendToBody :: LOC -> LOC -> LOC
-                      appendToBody (Body xs) (Body ys) = Body $ xs ++ ys
-                      appendToBody x (Body xs) = Body $ x : xs
-                      appendToBody (Body xs) x = Body $ xs ++ [x]
-                      appendToBody x y = Body [x, y]
-
-                      parseCase :: Parser
-                      parseCase = Parser $ \case
-                                    ([tape, stack]:restStr) -> do
-                                              (loc, restStr) <- runParser parse restStr
-                                              return (Case tape stack loc, restStr)
-                                    ([a]:_) -> Left $
-                                              "Case expression '"
-                                              ++ [a]
-                                              ++ "' must have a tape and stack char"
-                                    (a:_) -> Left $
-                                              "Not a valid case expression starting with '"
-                                              ++ a
-                                              ++ "' must have just a tape and stack char"
-                                    _ -> Left "Not a valid case expression"
+pushParser :: Parser Statement
+pushParser = Parser $ \case
+                  ("push":[c]:afterStr) -> Right (Push c, afterStr)
+                  ("push":afterStr) -> Left "Push requires a single stack symbol is pushed"
                   _ -> Left ""
 
-parsePush :: Parser
-parsePush = Parser $ \case
-              ("push":[c]:xs) -> Right (Push c, xs)
-              ("push":chars:xs) -> Left $ "Only a single char may be pushed, not '" ++ chars ++ "'"
-              ["push"] -> Left "Unexpected end of input after push"
-              _ -> Left ""
+popParser :: Parser Statement
+popParser = Parser $ \case
+                  ("pop":afterStr) -> Right (Pop, afterStr)
+                  _ -> Left ""
 
-parsePop :: Parser
-parsePop = Parser $ \case
-              ("pop":xs) -> Right (Pop, xs)
-              _ -> Left ""
-
-parseAccept :: Parser
-parseAccept = Parser $ \case
-              ("accept":xs) -> Right (Accept, xs)
-              _ -> Left ""
-
-parseReject :: Parser
-parseReject = Parser $ \case
-              ("reject":xs) -> Right (Reject, xs)
-              _ -> Left ""
+gotoParser :: Parser Statement
+gotoParser = Parser $ \case
+                  ("goto":state:afterStr) -> Right (Goto state, afterStr)
+                  _ -> Left ""
 
 tokenize :: String -> [String]
 tokenize str = join $ map (words . removeComment) (lines str)
