@@ -9,9 +9,11 @@
 
 start! {
   0_
-    push S
+    push 0
     goto loop
   1_
+    goto reject
+  **
     goto reject
 }
 loop! {
@@ -26,6 +28,8 @@ loop! {
   11
     goto reject
   1_
+    goto reject
+  0_
     goto reject
 }
 reject {
